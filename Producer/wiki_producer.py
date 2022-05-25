@@ -4,11 +4,12 @@ Maybe we should split this events according to the data and send it to different
 '''
 
 import json
-from kafka import KafkaProducer
 import argparse
+import cluster_utils
+from kafka import KafkaProducer
 from sseclient import SSEClient as EventSource
 from kafka.errors import NoBrokersAvailable
-from pywikibot.comms.eventstreams import EventStreams
+import subprocess
 
 
 def create_kafka_producer(bootstrap_server):
@@ -95,33 +96,27 @@ def main():
     # parse command line arguments
     args = parse_command_line_arguments()
 
+    # check if the server is already running
+    if not cluster_utils.is_cluster_available():
+        print("Cluster is not running.\nInitializing Zookeeper and kafka server...")
+        # if it's not, we will create a new one
+        # run zookeeper
+        subprocess.call(['.\\run-zookeeper.sh', '&'], shell=True, cwd='..\\bash_files\\')
+        # run kafka server
+        subprocess.call(['.\\run-kafka.sh', '&'], shell=True, cwd='..\\bash_files\\')
+
+    print(f"Cluster is {'Running' if cluster_utils.is_cluster_available() else 'Still Not running. Error.'}")
     # init producer
     producer = create_kafka_producer(args.bootstrap_server)
 
     # used to parse user type
     user_types = {True: 'bot', False: 'human'}
 
-    # consume websocket
-    # stream = EventStreams(streams=['page-create', 'recentchange'], since='20190111')
-    # # stream.register_filter(server_name='wikipedia.org', type='edit')
-    # # change = next(iter(stream))
-    #
-    # counter = 0
-    # data = {}
-    # for change in stream:
-    #     if 'recentchange' in change['meta']['topic']:
-    #         print("recentchange")
-    #         print('{type} on page "{title}" by "{user}" at {meta[dt]}.'.format(**change))
-    #
-    #     elif 'page-create' in change['meta']['topic']:
-    #         print("page-create")
-    #         # print('{type} on page "{title}" by "{user}" at {meta[dt]}.'.format(**change))
-    #
-    #     counter += 1
-    #     if counter > 10000:
-    #         break
+    # create new topic for each task
+    topics = ['recentchange', 'page-create']
 
-    url = 'https://stream.wikimedia.org/v2/stream/recentchange,page-create'
+    # consume websocket
+    url = f'https://stream.wikimedia.org/v2/stream/{",".join(topics)}'
 
     print('Messages are being published to Kafka topic')
     messages_count = 0
@@ -133,19 +128,14 @@ def main():
                 pass
             else:
                 # filter out events, keep only article edits (mediawiki.recentchange stream)
-                if 'recentchange' in event_data['meta']['topic']:
-                    print("recentchange")
-                    print('{type} on page "{title}" by "{user}" at {meta[dt]}.'.format(**event_data))
-
-                elif 'page-create' in event_data['meta']['topic']:
-                    print("page-create")
-                    # print('{type} on page "{title}" by "{user}" at {meta[dt]}.'.format(**change))
-                    # construct valid json event
-                    # event_to_send = construct_event(event_data, user_types)
-
-                    # producer.send('dtest', value=event_to_send)
-
-                    messages_count += 1
+                event_topic = event_data['meta']['topic'].split('.')[-1]
+                print(event_topic)
+                # construct valid json event
+                event_to_send = construct_event(event_data, user_types)
+                print(event_to_send)
+                # producer.send(topic=event_topic, value=event_to_send)
+                # print('{type} on page "{title}" by "{user}" at {meta[dt]}.'.format(**event_data))
+                messages_count += 1
 
         if messages_count >= args.events_to_produce:
             print('Producer will be killed as {} events were producted'.format(args.events_to_produce))
@@ -156,17 +146,3 @@ if __name__ == "__main__":
     # init dictionary of namespaces
     namespace_dict = init_namespaces()
     main()
-
-
-# import asyncio
-# import aiohttp
-# from aiosseclient import aiosseclient
-#
-#
-# async def main():
-#     async for event in aiosseclient('https://stream.wikimedia.org/v2/stream/page-create,recentchange'):
-#         print(event)
-#
-#
-# loop = asyncio.get_event_loop()
-# loop.run_until_complete(main())
