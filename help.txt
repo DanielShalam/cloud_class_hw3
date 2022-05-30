@@ -1,0 +1,6 @@
+1. Bot or Human
+2. User id/Name
+3. Timestamp
+4. Page id/Name
+5. URL
+6. To be continue
