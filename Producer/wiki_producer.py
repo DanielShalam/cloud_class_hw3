@@ -11,13 +11,6 @@ from sseclient import SSEClient as EventSource
 from kafka.errors import NoBrokersAvailable
 import subprocess
 
-# 1. Bot or Human
-# 2. User id/Name
-# 3. Timestamp
-# 4. Page id/Name
-# 5. URL
-# 6. To be continue
-
 
 def construct_create_event(event_data):
     # define the structure of the json event that will be published to kafka topic
@@ -62,7 +55,7 @@ def parse_command_line_arguments():
                         type=str)
     parser.add_argument('--topic_name', default='wikipedia-events', help='Destination topic name', type=str)
     parser.add_argument('--events_to_produce', help='Kill producer after n events have been produced', type=int,
-                        default=50)
+                        default=100)
 
     return parser.parse_args()
 
@@ -86,10 +79,10 @@ def main():
     producer = create_kafka_producer(args.bootstrap_server)
 
     # create new topic for each task
-    topics = ['recentchange', 'page-create']
-
+    events_to_topics = {'recentchange': 'edit-topic', 'page-create': 'create-topic'}
+    events = list(events_to_topics.keys())
     # consume websocket
-    url = f'https://stream.wikimedia.org/v2/stream/{",".join(topics)}'
+    url = f'https://stream.wikimedia.org/v2/stream/{",".join(events)}'
 
     print('Messages are being published to Kafka topic')
     messages_count = 0
@@ -103,15 +96,14 @@ def main():
                 # filter out events, keep only article edits (mediawiki.recentchange stream)
                 event_topic = event_data['meta']['topic'].split('.')[-1]
                 # construct valid json event
-                if event_topic == topics[0] and event_data['type'] == 'edit':
-                    continue
+                if event_topic == events[0] and event_data['type'] == 'edit':
                     event_to_send = construct_edit_event(event_data)
-                elif event_topic == topics[1]:
+                elif event_topic == events[1]:
                     event_to_send = construct_create_event(event_data)
                 else:
                     continue
 
-                producer.send('dtest', event_to_send)
+                producer.send(events_to_topics[event_topic], event_to_send)
                 messages_count += 1
                 print(messages_count)
 
