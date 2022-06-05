@@ -12,146 +12,276 @@ import org.apache.kafka.streams.kstream.*;
 import java.time.Duration;
 import java.util.*;
 
+enum timeDuration {
+    HOUR,
+    DAY,
+    WEEK,
+    MONTH
+}
+
+
 public class StreamerMain {
     static String input_created_topic = "create-topic";
     static String input_modified_topic = "edit-topic";
 
+    // out custom wikiSerde
+    static JsonSerializer<CreatedEvent> wikiJsonSerializer = new JsonSerializer<>();
+    static JsonDeserializer<CreatedEvent> wikiJsonDeserializer = new JsonDeserializer<>(CreatedEvent.class);
+    public static Serde<CreatedEvent> wikiSerde = Serdes.serdeFrom(wikiJsonSerializer, wikiJsonDeserializer);
+
+    // out custom TopKSerde
+    static JsonSerializer<GenericTopK> topKJsonSerializer = new JsonSerializer<>();
+    static JsonDeserializer<GenericTopK> topKJsonDeserializer = new JsonDeserializer<>(GenericTopK.class);
+    public static Serde<GenericTopK> topKSerde = Serdes.serdeFrom(topKJsonSerializer, topKJsonDeserializer);
+
+    static JsonSerializer<SumClass> SumClassJsonSerializer = new JsonSerializer<>();
+    static JsonDeserializer<SumClass> SumClassJsonDeserializer = new JsonDeserializer<>(SumClass.class);
+    public static Serde<SumClass> SumClassSerde = Serdes.serdeFrom(SumClassJsonSerializer, SumClassJsonDeserializer);
+
+    public static String outTopic = "outputTopic";
+
+    public static int top_K = 5;
+
+    // 3. to output topic
+    public static HashMap<String, String> keyUserMapper = new HashMap<>();
+
     public static void main(final String[] args) throws Exception {
-        String output_topic = "outputTopic";
-        String time_topic = "timeTopic";
-
         // initialize properties for out stream workers
-        Properties properties = StreamerMain.getProperties("wiki-streamer");
+        Properties properties = StreamerMain.getProperties("main-wiki-streamer");
 
-        // out custom wikiSerde
-        JsonSerializer<CreatedEvent> wikiJsonSerializer = new JsonSerializer<>();
-        JsonDeserializer<CreatedEvent> wikiJsonDeserializer = new JsonDeserializer<>(CreatedEvent.class);
-        Serde<CreatedEvent> wikiSerde = Serdes.serdeFrom(wikiJsonSerializer,wikiJsonDeserializer);
-
-        // out custom TopKSerde
-        JsonSerializer<GenericTopK> topKJsonSerializer = new JsonSerializer<>();
-        JsonDeserializer<GenericTopK> topKJsonDeserializer = new JsonDeserializer<>(GenericTopK.class);
-        Serde<GenericTopK> topKSerde = Serdes.serdeFrom(topKJsonSerializer,topKJsonDeserializer);
+        // Add keys and values (Country, City)
+        keyUserMapper.put("true", "Bot");
+        keyUserMapper.put("false", "Human");
 
         // build stream worker
         StreamsBuilder builder = new StreamsBuilder();
 
-        String createMethod = "language+week";
-        String modifyMethod = "month+language";
+        String createdEvent = "Page-created";
+        String modifyEvent = "Page-edited";
 
         try {
-            KStream<String, CreatedEvent> create_stream = builder.
+            // stream for page added event
+            KStream<String, CreatedEvent> createStream = builder.
                     stream(input_created_topic, Consumed.with(Serdes.String(), wikiSerde));
 
-            KStream<String, CreatedEvent> modify_stream = builder.
+            // stream for modify page event
+            KStream<String, CreatedEvent> modifyStream = builder.
                     stream(input_modified_topic, Consumed.with(Serdes.String(), wikiSerde));
 
-            mostActiveUsers(create_stream, modify_stream, topKSerde, output_topic);
-//            create_stream = processStream(create_stream, output_topic, createMethod, "Create worker", "added");
-//            modify_stream = processStream(modify_stream, output_topic, modifyMethod, "Modify worker", "edited");
-//            mostActivePages(modify_stream, output_topic, modifyMethod, topKSerde, 5);
+            // Event: Page-created
+            byTimePipeline(createStream, createdEvent);
+            byUserPipeline(createStream, createdEvent);
+            byLanguagePipeline(createStream, createdEvent);
+
+            // Event: Page-edited
+            byTimePipeline(modifyStream, modifyEvent);
+            byUserPipeline(modifyStream, modifyEvent);
+            byLanguagePipeline(modifyStream, modifyEvent);
+
+            // Top-K now ....
+            topKByUserPipeline(createStream, modifyStream);
+            topKByTimePipeline(createStream, modifyStream);
+            topKByLanguagePipeline(createStream, modifyStream, "Pages");
+            topKByLanguagePipeline(createStream, modifyStream, "Users");
 
         } catch (Exception s) {
             s.printStackTrace();
         }
 
-        KafkaStreams createStreams = new KafkaStreams(builder.build(), properties);
+        KafkaStreams streams = new KafkaStreams(builder.build(), properties);
 
-        createStreams.cleanUp();
-        createStreams.setUncaughtExceptionHandler((Thread t, Throwable e) -> System.out.println(e));
-        createStreams.start();
+        streams.cleanUp();
+        streams.setUncaughtExceptionHandler((Thread t, Throwable e) -> System.out.println(e));
+        streams.start();
 
 //        createStreams.close();
     }
 
-    public static KStream<String, CreatedEvent> processStream(KStream<String, CreatedEvent> stream, String topic,
-                                                              String method, String workerName, String type) {
-//        // filter by time
-//        stream = TimeStreamer.timeFiltering(stream, method);
-//        String timeString = TimeStreamer.getTimeString(method);
+    public static void byTimePipeline(KStream<String, CreatedEvent> stream, String event) throws Exception {
+        // Extract events by Time
+        // Group events under the same key
+        KGroupedStream<String, CreatedEvent> groupedStream = stream.
+                map((key, value) -> new KeyValue<>("dummy", value)).groupByKey(Grouped.with(Serdes.String(), wikiSerde));
 
-        String timeString = method;
+        // All-time events
+        groupedStream.count().toStream().
+                map((key, value) -> KeyValue.pair(key, "Event: " + event + ", Duration: All time, Count: " + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
 
-        // group by certain property, language or none for now
-        if (method.contains("language")) {
-            streamByLanguage(stream, topic, timeString, workerName, type);
+        // By time window
+        //// Hour
+        durationFilter(groupedStream, timeDuration.HOUR).count().
+                toStream().map((key, value) -> KeyValue.pair(key.toString(), "Event: " + event + ", Duration: Last Hour, Count: " + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
 
-        } else if (method.contains("user")) {
-            streamByUserType(stream, topic, timeString, workerName, type);
+        //// Day
+        durationFilter(groupedStream, timeDuration.DAY).count().
+                toStream().map((key, value) -> KeyValue.pair(key.toString(), "Event: " + event + ", Duration: Last Day, Count: " + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
 
-        } else {
-            streamAll(stream, topic, timeString, workerName, type);
-        }
-        return stream;
+        //// Week
+        durationFilter(groupedStream, timeDuration.WEEK).count().
+                toStream().map((key, value) -> KeyValue.pair(key.toString(), "Event: " + event + ", Duration: Last Week, Count: " + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
+
+        //// Month
+        durationFilter(groupedStream, timeDuration.MONTH).count().
+                toStream().map((key, value) -> KeyValue.pair(key.toString(), "Event: " + event + ", Duration: Last Month, Count: " + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
     }
 
-    public static void mostActiveUsers(KStream<String, CreatedEvent> createdStream,
-                                       KStream<String, CreatedEvent> modifyStream,
-                                       Serde<GenericTopK> topKSerde, String output_topic) {
+    public static void byUserPipeline(KStream<String, CreatedEvent> stream, String event){
+        // group instances by User_is_bot and calculate their frequency (count)
+        KStream<String, Long> countStream = stream.map((key, value) -> KeyValue.pair(value.getUser_is_bot(), value)).
+                                            groupByKey(Grouped.with(Serdes.String(), wikiSerde)).
+                                            count().toStream();
 
-        KTable<String, Long> createdKTable = createdStream.
-                map((key, value) -> KeyValue.pair(value.getUser_name(), "")).
-                groupByKey(Grouped.with(Serdes.String(), Serdes.String())).
-                count();
+        // to output topic
+        countStream.map((key, value) -> new KeyValue<>(key, "Event: " + event + ", User type: " + keyUserMapper.get(key)
+                        + ", Count: " + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
 
-        KTable<String, Long> modifyKTable = modifyStream.
-                map((key, value) -> KeyValue.pair(value.getUser_name(), "")).
-                groupByKey(Grouped.with(Serdes.String(), Serdes.String())).
-                count();
+        aggregateCountSum(countStream, event);
+    }
+    public static void byLanguagePipeline(KStream<String, CreatedEvent> stream, String event) {
+        KStream<String, Long> countStream = stream.
+                // 1. Filter domains which starts with "www" or "common".
+                filter((key, value) -> !value.getDomain().startsWith("www") && !value.getDomain().startsWith("common")).
+                // 2. Group all instances by their language and count number of instances in each key.
+                map((key, value) -> new KeyValue<>(value.getDomain().split("\\.")[0], value)).
+                groupByKey(Grouped.with(Serdes.String(), wikiSerde)).
+                // 3. Count
+                count().toStream();
+                // 4. Send to the output topic
 
-        // outer join
-        KTable<String, Long> joinKTable = createdKTable.outerJoin(modifyKTable,
+        countStream.map((key, value) -> new KeyValue<>(key, "Event: " + event + ", Language: " +
+                key + ", Count: " + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
+
+        aggregateCountSum(countStream, event);
+    }
+
+    public static void topKByTimePipeline(KStream<String, CreatedEvent> createStream,
+                                          KStream<String, CreatedEvent> modifyStream) throws Exception {
+
+        // top-k users in total
+        mostActiveUsers(createStream, modifyStream, null,"All Time Most active Users (5): \n", false);
+
+        // By time window
+        mostActiveUsers(createStream, modifyStream, timeDuration.HOUR,"Last Hour Most active Users (5): \n", true);
+        mostActiveUsers(createStream, modifyStream, timeDuration.DAY,"Last Day Most active Users (5): \n", true);
+        mostActiveUsers(createStream, modifyStream, timeDuration.WEEK,"Last Week Most active Users (5): \n", true);
+        mostActiveUsers(createStream, modifyStream, timeDuration.MONTH,"Last Month Most active Users (5): \n", true);
+
+        // top-k users in total
+        mostActivePages(createStream, modifyStream, null,"All Time Most active Pages (5): \n", false);
+
+        // By time window
+        mostActivePages(createStream, modifyStream, timeDuration.HOUR,"Last Hour Most active Pages (5): \n", true);
+        mostActivePages(createStream, modifyStream, timeDuration.DAY,"Last Day Most active Pages (5): \n", true);
+        mostActivePages(createStream, modifyStream, timeDuration.WEEK,"Last Week Most active Pages (5): \n", true);
+        mostActivePages(createStream, modifyStream, timeDuration.MONTH,"Last Month Most active Pages (5): \n", true);
+    }
+
+    public static void topKByUserPipeline(KStream<String, CreatedEvent> createStream,
+                                          KStream<String, CreatedEvent> modifyStream) throws Exception {
+
+        //// Filter data and get only bot events
+        KStream<String, CreatedEvent> botCreatedStream = createStream.
+                filter((key, value) -> value.getUser_is_bot().equals("true"));
+        KStream<String, CreatedEvent> botModifyStream = modifyStream.
+                filter((key, value) -> value.getUser_is_bot().equals("true"));
+
+        // join and find top-k Bots
+        mostActiveUsers(botCreatedStream, botModifyStream, null,"Most active Users(Bots) (5): \n", false);
+        mostActivePages(botCreatedStream, botModifyStream, null,"Most active Pages(By Bots) (5): \n", false);
+
+        //// Filter data and get only human events
+        KStream<String, CreatedEvent> humanCreatedStream = createStream.
+                filter((key, value) -> value.getUser_is_bot().equals("false"));
+        KStream<String, CreatedEvent> humanModifyStream = modifyStream.
+                filter((key, value) -> value.getUser_is_bot().equals("false"));
+
+        // join and find top-k Bots
+        mostActiveUsers(humanCreatedStream, humanModifyStream, null, "Most active Users(Humans) (5): \n", false);
+        mostActivePages(humanCreatedStream, humanModifyStream, null, "Most active Pages(By Humans) (5): \n", false);
+    }
+
+    public static void topKByLanguagePipeline(KStream<String, CreatedEvent> createStream,
+                                              KStream<String, CreatedEvent> modifyStream, String eventType) throws Exception {
+        KTable<String, Long> createdCountTable;
+        KTable<String, Long> modifiedCountTable;
+
+        //// filter and group by domain
+        KStream<String, CreatedEvent> createFiltered = createStream.
+                // 1. Filter domains which starts with "www" or "common".
+                filter((key, value) -> !value.getDomain().startsWith("www") && !value.getDomain().startsWith("common"));
+
+        //// filter and group by domain
+        KStream<String, CreatedEvent> modifyFiltered = modifyStream.
+                // 1. Filter domains which starts with "www" or "common".
+                filter((key, value) -> !value.getDomain().startsWith("www") && !value.getDomain().startsWith("common"));
+
+        if (eventType.startsWith("Page")) {
+            createdCountTable = createFiltered.
+                    map((key, value) -> KeyValue.pair(value.getDomain().split("\\.")[0] + GenericTopK.separator + value.getPage_id(), value)).
+                    groupByKey(Grouped.with(Serdes.String(), wikiSerde)).
+                    count();
+
+            modifiedCountTable = createFiltered.
+                    map((key, value) -> KeyValue.pair(value.getDomain().split("\\.")[0] + GenericTopK.separator + value.getPage_id(), value)).
+                    groupByKey(Grouped.with(Serdes.String(), wikiSerde)).
+                    count();
+        }
+        else {
+            createdCountTable = createFiltered.
+                    map((key, value) -> KeyValue.pair(value.getDomain().split("\\.")[0] + GenericTopK.separator + value.getUser_name(), value)).
+                    groupByKey(Grouped.with(Serdes.String(), wikiSerde)).
+                    count();
+
+            modifiedCountTable = createFiltered.
+                    map((key, value) -> KeyValue.pair(value.getDomain().split("\\.")[0] + GenericTopK.separator + value.getUser_name(), value)).
+                    groupByKey(Grouped.with(Serdes.String(), wikiSerde)).
+                    count();
+        }
+
+        // outer join for all counts
+        KTable<String, Long> joinKTable = createdCountTable.outerJoin(modifiedCountTable,
                 (leftValue, rightValue) -> {
-                if (leftValue == null){
-                    leftValue = 0L;
-                }
-                if (rightValue == null){
-                    rightValue = 0L;
-                }
-                return leftValue + rightValue;
-        } /* ValueJoiner */
+                    if (leftValue == null) {
+                        leftValue = 0L;
+                    }
+                    if (rightValue == null) {
+                        rightValue = 0L;
+                    }
+                    return leftValue + rightValue;
+                } /* ValueJoiner */
                 /* ValueJoiner */);
 
-        KTable<String, GenericTopK> topKKTable = topK(joinKTable, " ", " ", topKSerde, 5);
+        // map to key languages
+        joinKTable.toStream().map((key, value) -> new KeyValue<>(key.split(GenericTopK.separator)[0],
+                key.split(GenericTopK.separator)[1] + GenericTopK.separator + value.toString()));
 
-        // now we need to publish the results:
-        topKKTable.toStream().
-                mapValues(value -> "Most active Users (5):\n" + value.toString()).
-                to(output_topic, Produced.with(Serdes.String(), Serdes.String()));
-
-    }
-
-    public static KTable<String, GenericTopK> topK(KTable<String, Long> stream, String topic, String method,
-                                                   Serde<GenericTopK> topKSerde, int k) {
-//        // filter by time
-//        stream = TimeStreamer.timeFiltering(stream, method);
-//        String timeString = TimeStreamer.getTimeString(method);
-        GenericTopK genericClass = new GenericTopK(5);
         // Group all instances by their user type (bot or not) and count for each type
-        KTable<String, GenericTopK> topKKTable = stream.
-                // 1. set the key as the id and the value to the time_stamp (as string)
-//                map((key, value) -> new KeyValue<>(value.getPage_id(), "")).
-//                groupByKey(Grouped.with(Serdes.String(), Serdes.String())).
-////                count(Materialized.as("count-store")).
-//                count().
-                // merge key and value for later use
-                mapValues((key, value) -> key + GenericTopK.separator + value.toString()).toStream().
+        KTable<String, GenericTopK> topKKTable = joinKTable.toStream().map((key, value) -> new KeyValue<>(key.split(GenericTopK.separator)[0],
+                key.split(GenericTopK.separator)[1] + GenericTopK.separator + value.toString())).
                 // group all instances by the same key
-                groupBy((key, value) -> "Dummy").
-                aggregate(() -> genericClass,
+                groupBy((key, value) -> key).
+                aggregate(() -> new GenericTopK(top_K),
                         // the aggregator
                         (key, value, topK) -> {
+                            if (topK.isNew(value)){
+                                // replace old value with new one
+                                return (topK);
+                            }
                             // add the new count to the array
-                            genericClass.elementsArray[k] = value;
+                            topK.elementsArray[top_K] = value;
                             // sort the array by counts, the largest first
                             Arrays.sort(
-                                    genericClass.elementsArray, (a, b) -> {
-                                        System.out.println(Arrays.toString(topK.elementsArray));
-//                                        System.out.println(a);
-//                                        System.out.println(b);
+                                    topK.elementsArray, (a, b) -> {
                                         // in the initial cycles, some values will be null
-                                        if (a == null)  return 1;
-                                        if (b == null)  return -1;
+                                        if (a == null) return 1;
+                                        if (b == null) return -1;
 
                                         String[] parts_a = a.split(GenericTopK.separator);
                                         String[] parts_b = b.split(GenericTopK.separator);
@@ -161,56 +291,192 @@ public class StreamerMain {
                                     }
                             );
                             // set GenericCountHolder k+1 to null
-                            genericClass.elementsArray[k] = null;
-                            return (genericClass);
+                            topK.elementsArray[top_K] = null;
+                            return (topK);
                         },
 
                         Materialized.with(Serdes.String(), topKSerde));
 
-          return topKKTable;
-//        // now we need to publish the results:
-//        topKKTable.toStream().mapValues(value -> "Most active Pages (5):\n" + value.toString()).
-//                to(topic, Produced.with(Serdes.String(), Serdes.String()));
-
+        // now we need to publish the results:
+        topKKTable.toStream().
+                map((key, value) -> KeyValue.pair(key, "Most active " + eventType + " for Language: " +
+                        key + "\n" + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
     }
 
-    public static void streamByUserType(KStream<String, CreatedEvent> stream, String topic,
-                                        String timeString, String workerName, String type) {
+    public static void mostActiveUsers(KStream<String, CreatedEvent> createdStream, KStream<String, CreatedEvent> modifyStream,
+                                       timeDuration duration, String eventString, boolean timeWindow) throws Exception {
+        KTable<String, Long> createKTable;
+        KTable<String, Long> modifyKTable;
+
+        // group stream instances
+        KGroupedStream<String, CreatedEvent> createdGroupedTable = createdStream.
+                map((key, value) -> KeyValue.pair(value.getUser_name(), value)).
+                groupByKey(Grouped.with(Serdes.String(), wikiSerde));
+
+        KGroupedStream<String, CreatedEvent> modifyGroupedTable = modifyStream.
+                map((key, value) -> KeyValue.pair(value.getUser_name(), value)).
+                groupByKey(Grouped.with(Serdes.String(), wikiSerde));
+
+        if (timeWindow) {
+            createKTable = durationFilter(createdGroupedTable, duration).count().
+                    toStream().
+                    map((key, value) -> KeyValue.pair(key.toString().split("@")[0].substring(1), value)).
+                    toTable(Materialized.with(Serdes.String(), Serdes.Long()));
+
+            modifyKTable = durationFilter(modifyGroupedTable, duration).count().
+                    toStream().
+                    map((key, value) -> KeyValue.pair(key.toString().split("@")[0].substring(1), value)).
+                    toTable(Materialized.with(Serdes.String(), Serdes.Long()));
+        }
+        else {
+            createKTable = createdGroupedTable.count();
+            modifyKTable = modifyGroupedTable.count();
+        }
+
+        // outer join
+        KTable<String, Long> joinKTable = createKTable.outerJoin(modifyKTable,
+                (leftValue, rightValue) -> {
+                    if (leftValue == null) {
+                        leftValue = 0L;
+                    }
+                    if (rightValue == null) {
+                        rightValue = 0L;
+                    }
+                    return leftValue + rightValue;
+                } /* ValueJoiner */
+                /* ValueJoiner */);
+        KTable<String, GenericTopK> topKKTable = topK(joinKTable);
+
+        // now we need to publish the results:
+        topKKTable.toStream().
+                map((key, value) -> KeyValue.pair(key.toString(), eventString + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
+    }
+
+    public static void mostActivePages(KStream<String, CreatedEvent> createdStream, KStream<String, CreatedEvent> modifyStream,
+                                       timeDuration duration, String eventString, boolean timeWindow) throws Exception {
+        KTable<String, Long> createKTable;
+        KTable<String, Long> modifyKTable;
+
+        // group stream instances
+        KGroupedStream<String, CreatedEvent> createdGroupedTable = createdStream.
+                map((key, value) -> KeyValue.pair(value.getPage_id(), value)).
+                groupByKey(Grouped.with(Serdes.String(), wikiSerde));
+
+        KGroupedStream<String, CreatedEvent> modifyGroupedTable = modifyStream.
+                map((key, value) -> KeyValue.pair(value.getPage_id(), value)).
+                groupByKey(Grouped.with(Serdes.String(), wikiSerde));
+
+        if (timeWindow) {
+            createKTable = durationFilter(createdGroupedTable, duration).count().
+                    toStream().
+                    map((key, value) -> KeyValue.pair(key.toString().split("@")[0].substring(1), value)).
+                    toTable(Materialized.with(Serdes.String(), Serdes.Long()));
+
+            modifyKTable = durationFilter(modifyGroupedTable, duration).count().
+                    toStream().
+                    map((key, value) -> KeyValue.pair(key.toString().split("@")[0].substring(1), value)).
+                    toTable(Materialized.with(Serdes.String(), Serdes.Long()));
+        }
+        else {
+            createKTable = createdGroupedTable.count();
+            modifyKTable = modifyGroupedTable.count();
+        }
+
+        // outer join
+        KTable<String, Long> joinKTable = createKTable.outerJoin(modifyKTable,
+                (leftValue, rightValue) -> {
+                    if (leftValue == null) {
+                        leftValue = 0L;
+                    }
+                    if (rightValue == null) {
+                        rightValue = 0L;
+                    }
+                    return leftValue + rightValue;
+                } /* ValueJoiner */
+                /* ValueJoiner */);
+        KTable<String, GenericTopK> topKKTable = topK(joinKTable);
+
+        // now we need to publish the results:
+        topKKTable.toStream().
+                map((key, value) -> KeyValue.pair(key.toString(), eventString + value.toString())).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
+    }
+
+
+    public static void aggregateCountSum(KStream<String, Long> stream, String event){
+        // function to find the relative part of each value in a key.
+        // implemented by aggregating the sum over all counts under the same key.
+        KTable<String, SumClass> sumTable = stream.mapValues((key, value) -> (key + GenericTopK.separator + value.toString())).
+                groupBy((key, value) -> "1").
+                aggregate(() -> new SumClass(),
+                        (key, value, aggregate) -> {
+                            if (value == null){
+                                return aggregate;
+                            }
+                            aggregate.add(value);
+                            return aggregate;
+                        },
+                        Materialized.with(Serdes.String(), SumClassSerde));
+
+        sumTable.toStream().mapValues((key, value) -> event + " Relative part per key: " + value.toString()).
+                to(outTopic, Produced.with(Serdes.String(), Serdes.String()));
+        }
+
+    public static KTable<String, GenericTopK> topK (KTable<String, Long> stream) {
         // Group all instances by their user type (bot or not) and count for each type
-        stream.
-                map((key, value) -> new KeyValue<>(value.getUser_is_bot(), value.getPage_id())).
-                groupByKey(Grouped.with(Serdes.String(), Serdes.String())).count().
-                toStream().map((key, value) -> new KeyValue<> (key, "Worker: " + workerName + ", Is bot: " +
-                        key + ", " + value.toString() + " Pages " + type + " " + timeString)).
-                to(topic, Produced.with(Serdes.String(), Serdes.String()));;
+        KTable<String, GenericTopK> topKKTable = stream.
+                // merge key and value for later use
+                mapValues((key, value) -> key + GenericTopK.separator + value.toString()).toStream().
+                // group all instances by the same key
+                groupBy((key, value) -> "Dummy").
+                aggregate(() -> new GenericTopK(top_K),
+                        // the aggregator
+                        (key, value, topK) -> {
+                            if (topK.isNew(value)){
+                                // replace old value with new one
+                                return (topK);
+                            }
+                            // add the new count to the array
+                            topK.elementsArray[top_K] = value;
+                            // sort the array by counts, the largest first
+                            Arrays.sort(
+                                    topK.elementsArray, (a, b) -> {
+                                        // in the initial cycles, some values will be null
+                                        if (a == null) return 1;
+                                        if (b == null) return -1;
+
+                                        String[] parts_a = a.split(GenericTopK.separator);
+                                        String[] parts_b = b.split(GenericTopK.separator);
+
+                                        // with two proper CountryMessage objects, do the normal comparison
+                                        return Integer.compare(Integer.parseInt(parts_b[1]), Integer.parseInt(parts_a[1]));
+                                    }
+                            );
+                            // set GenericCountHolder k+1 to null
+                            topK.elementsArray[top_K] = null;
+                            return (topK);
+                        },
+
+                        Materialized.with(Serdes.String(), topKSerde));
+
+        return topKKTable;
     }
 
-    public static void streamByLanguage(KStream<String, CreatedEvent> stream, String topic,
-                                        String timeString, String workerName, String type) {
-        // 1. Filter domains which starts with "www" or "common".
-        // 2. Group all instances by their language and count number of instances in each key.
-//        TimeWindowedSerializer<String> windowedSerializer = new TimeWindowedSerializer<>();
-//        TimeWindowedDeserializer<String> windowedDeserializer = new TimeWindowedDeserializer<>();
-//        Serde<Windowed<String>> windowsSerde = Serdes.serdeFrom(windowedSerializer, windowedDeserializer);
-
-        stream.
-                filter((key, value) -> !value.getDomain().startsWith("www") && !value.getDomain().startsWith("common")).
-                map((key, value) -> new KeyValue<>(value.getDomain().split("\\.")[0], value.getPage_id())).
-                groupByKey(Grouped.with(Serdes.String(), Serdes.String())).windowedBy(TimeWindows.of(Duration.ofDays(7))).count().
-                toStream().map((key, value) -> new KeyValue <>
-                        (key.toString(), "Worker: " + workerName + ", Language: " +
-                        key + ", " + value.toString() + " Pages " + type + " " + timeString)).
-                to(topic, Produced.with(Serdes.String(), Serdes.String()));;
-    }
-
-    public static void streamAll(KStream<String, CreatedEvent> stream, String topic,
-                                 String timeString, String workerName, String type) {
-//         Total count of page created events
-        stream.
-                map((key, value) -> new KeyValue<>("Dummy", value.getPage_id())).
-                groupByKey(Grouped.with(Serdes.String(), Serdes.String())).count().
-                toStream().mapValues(v -> v.toString() + " " + type + " added " + timeString + ", Worker: " + workerName).
-                to(topic, Produced.with(Serdes.String(), Serdes.String()));
+    public static TimeWindowedKStream<String, CreatedEvent> durationFilter(KGroupedStream<String, CreatedEvent> groupedStream,
+                                                                           timeDuration duration) throws Exception {
+        switch (duration) {
+            case HOUR:
+                return groupedStream.windowedBy(TimeWindows.of(Duration.ofHours(1)));
+            case DAY:
+                return groupedStream.windowedBy(TimeWindows.of(Duration.ofDays(1)));
+            case WEEK:
+                return groupedStream.windowedBy(TimeWindows.of(Duration.ofDays(7)));
+            case MONTH:
+                return groupedStream.windowedBy(TimeWindows.of(Duration.ofDays(30)));
+        }
+        throw new Exception();
     }
 
     private static Properties getProperties(String appName) {
@@ -221,95 +487,7 @@ public class StreamerMain {
         props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass());
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass());
         //props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG,StreamsConfig.EXACTLY_ONCE);
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         return props;
     }
-
-
-    // define class that will the topK values
-//    public class GenericTopK {
-//        static String separator = "/S/";
-//        static int k = 5;
-//        public String[] elementsArray;
-//        public GenericTopK() {}
-//        public GenericTopK(int k) {
-////            this.elementsArray = new GenericCountHolder[k+1];
-//            this.elementsArray = new String[k+1];
-//            System.out.println("Array: ");
-//            System.out.println(Arrays.toString(this.elementsArray));
-//        }
-//
-//        @Override
-//        public String toString(){
-//            StringBuilder outString = new StringBuilder();
-//
-//            for (int i = 0; i < this.elementsArray.length - 1; i++) {
-//                if (this.elementsArray[i] == null) {
-//                    break;
-//                }
-//                String[] parts = this.elementsArray[i].split(separator);
-//                String current = (i+1) + ". ID: " + parts[0] + ", Count: " + parts[1] + "\n";
-//                outString.append(current);
-//            }
-//            return outString.toString();
-//        }
-//
-//        public void initArray(){
-//            this.elementsArray = new String[k+1];
-//            return;
-//        }
-//    }
-
-
 }
-
-
-//    public static KTable<String, GenericTopK> topK(KTable<String, Long> stream, String topic, String method,
-//                                                   Serde<GenericTopK> topKSerde, int k) {
-////        // filter by time
-////        stream = TimeStreamer.timeFiltering(stream, method);
-////        String timeString = TimeStreamer.getTimeString(method);
-//
-//        // Group all instances by their user type (bot or not) and count for each type
-//        KTable<String, GenericTopK> topKKTable = stream.
-//                // 1. set the key as the id and the value to the time_stamp (as string)
-////                map((key, value) -> new KeyValue<>(value.getPage_id(), "")).
-////                groupByKey(Grouped.with(Serdes.String(), Serdes.String())).
-//////                count(Materialized.as("count-store")).
-////                count().
-//                // merge key and value for later use
-//                        mapValues((key, value) -> key + GenericTopK.separator + value.toString()).toStream().
-//                // group all instances by the same key
-//                        groupBy((key, value) -> "Dummy").
-//                aggregate(() -> new GenericTopK(k),
-//                        // the aggregator
-//                        (key, value, topK) -> {
-//                            // add the new count to the array
-//                            topK.elementsArray[k] = value;
-//                            // sort the array by counts, the largest first
-//                            Arrays.sort(
-//                                    topK.elementsArray, (a, b) -> {
-//                                        System.out.println(a);
-//                                        System.out.println(b);
-//                                        // in the initial cycles, some values will be null
-//                                        if (a == null)  return 1;
-//                                        if (b == null)  return -1;
-//
-//                                        String a_val = a.split(GenericTopK.separator)[1];
-//                                        String b_val = b.split(GenericTopK.separator)[1];
-//                                        // with two proper CountryMessage objects, do the normal comparison
-//                                        return Integer.compare(Integer.parseInt(b_val), Integer.parseInt(a_val));
-//                                    }
-//                            );
-//                            // set GenericCountHolder k+1 to null
-//                            topK.elementsArray[k] = null;
-//                            return (topK);
-//                        },
-//                        Materialized.with(Serdes.String(), topKSerde));
-//
-//        return topKKTable;
-////        // now we need to publish the results:
-////        topKKTable.toStream().mapValues(value -> "Most active Pages (5):\n" + value.toString()).
-////                to(topic, Produced.with(Serdes.String(), Serdes.String()));
-//
-//    }

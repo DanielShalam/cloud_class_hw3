@@ -1,0 +1,58 @@
+1. Maybe fix the replicated issue.
+2. Top5 - By time, user type and language.
+3. By time - everything else, need to choose the right window type.
+4. The relative part of use type and language for each task.
+5. Murder kafka creator.
+
+Action ->
+
+    1. Page-created event:
+        By time:
+            - Group instances under the same key.
+            -- All time events - Count everything.
+            -- Last month, week, day, hour - Set window and count.
+
+        By users:
+            - Group instances by user_type (bot/human) and count.
+
+        By language:
+            - Group instances by language and count.
+
+    2. Page-modified event:
+        By time:
+            - Group instances under the same key.
+            -- All time events - Count everything.
+            -- Last month, week, day, hour - Set window and count.
+
+        By users:
+            - Group instances by user_type (bot/human) and count.
+
+        By language:
+            - Group instances by language and count.
+
+    3. Top-K users:
+        - First, join streams using an outer-join.
+        - Group instances user_id.
+
+        By time:
+            - For all time, just find the top-k and plot.
+            - For window-based, Window the table by a given duration. Find top-k and plot.
+
+        By users:
+            - Filter by user_type.
+
+        By language:
+            - Bob is dead so far ...
+
+    3. Top-K pages (Assumption: Added page is not effecting the count):
+        - Group by page_id
+
+        By time:
+            - For all time, just find the top-k and plot.
+            - For window-based, Window the table by a given duration. Find top-k and plot.
+
+        By users:
+            - Filter by user_type.
+
+        By language:
+            - Bob is dead so far ...

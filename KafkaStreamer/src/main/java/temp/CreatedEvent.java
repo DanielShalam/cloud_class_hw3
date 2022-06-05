@@ -40,7 +40,6 @@ public class CreatedEvent implements Serializable {
     }
 
     public String getPage_id() {
-        System.out.println("pageid");
         return page_id;
     }
 

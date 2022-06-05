@@ -55,7 +55,7 @@ def parse_command_line_arguments():
                         type=str)
     parser.add_argument('--topic_name', default='wikipedia-events', help='Destination topic name', type=str)
     parser.add_argument('--events_to_produce', help='Kill producer after n events have been produced', type=int,
-                        default=100)
+                        default=500)
 
     return parser.parse_args()
 

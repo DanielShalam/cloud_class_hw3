@@ -27,7 +27,6 @@ public class JsonSerializer<T> implements Serializer<T> {
     public byte[] serialize(String topic, T data) {
         byte[] retval = null;
         try {
-            System.out.println(data.getClass());
             retval = om.writeValueAsString(data).getBytes();
         } catch (JsonProcessingException e) {
             throw new SerializationException();
